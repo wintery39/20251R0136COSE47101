@@ -30,7 +30,7 @@ MAX_GENERATION_TOKENS = 75
 # Number of search results to retrieve
 NUM_SEARCH_RESULTS = 3
 
-class RAGAgentYmk(BaseAgent):
+class RAGAgentSusik(BaseAgent):
     """
     SimpleRAGAgent demonstrates all the basic components you will need to create your 
     RAG submission for the CRAG-MM benchmark.
@@ -175,8 +175,7 @@ class RAGAgentYmk(BaseAgent):
                     "image": image
                 }
             })
-        
-        # Generate summaries in a single batch call
+        # Generate summaries in a single batch 
         outputs = self.llm.generate(
             inputs,
             sampling_params=vllm.SamplingParams(
