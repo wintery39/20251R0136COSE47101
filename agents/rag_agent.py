@@ -144,13 +144,30 @@ class SimpleRAGAgent(BaseAgent):
             List[str]: List of brief text summaries, one per image.
         """
         # Prepare image summarization prompts in batch
-        summarize_prompt = "Please summarize the image with one sentence that describes its key elements."
+        summarize_prompt = (
+            "Provide a concise summary of the key visual elements in the image in up to two sentences. "
+            "Mention the main objects you see, their actions or positions, and any notable attributes directly observable."
+        )
         
         inputs = []
         for image in images:
             messages = [
-                {"role": "system", "content": "You are a helpful assistant that accurately describes images. Your responses are subsequently used to perform a web search to retrieve the relevant information about the image."},
-                {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": summarize_prompt}]},
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an image description assistant. "
+                        "You must describe only what is directly visible in the image: "
+                        "objects, their attributes, actions, and spatial relationships. "
+                        "Keep answers factual and concise. "
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": summarize_prompt}
+                    ]
+                },
             ]
             
             # Format prompt using the tokenizer
@@ -224,8 +241,12 @@ class SimpleRAGAgent(BaseAgent):
             zip(queries, images, message_histories, search_results_batch)
         ):
             # Create system prompt with RAG guidelines
-            SYSTEM_PROMPT = ("You are a helpful assistant that truthfully answers user questions about the provided image."
-                           "Keep your response concise and to the point. If you don't know the answer, respond with 'I don't know'.")
+            SYSTEM_PROMPT = (
+                "You are a helpful assistant that accurately describes and answers questions based only on the content of the provided image. "
+                "Provide answers that are concise"
+                "If you are not completely certain or the requested information is not directly observable in the image, you must reply exactly with 'I don't know' without any additional commentary. "
+                "Do not guess, infer unseen details, or introduce facts not present in the image."
+            )
             
             # Add retrieved context if available
             rag_context = ""
