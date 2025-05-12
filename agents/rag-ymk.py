@@ -30,7 +30,7 @@ MAX_GENERATION_TOKENS = 75
 # Number of search results to retrieve
 NUM_SEARCH_RESULTS = 3
 
-class SimpleRAGAgent(BaseAgent):
+class RAGAgentYmk(BaseAgent):
     """
     SimpleRAGAgent demonstrates all the basic components you will need to create your 
     RAG submission for the CRAG-MM benchmark.
@@ -144,12 +144,21 @@ class SimpleRAGAgent(BaseAgent):
             List[str]: List of brief text summaries, one per image.
         """
         # Prepare image summarization prompts in batch
-        summarize_prompt = "Please summarize the image with one sentence that describes its key elements."
+        summarize_prompt = (
+            "This image will be used for a web search to find more information. "
+            "Describe the key objects, scene, and any recognizable landmarks or context in the image "
+            "as a comma-separated list of keywords. Focus on nouns and proper nouns."
+            "Example: Eiffel Tower, Paris, daytime, tourists, clear sky"
+        )
         
         inputs = []
         for image in images:
             messages = [
-                {"role": "system", "content": "You are a helpful assistant that accurately describes images. Your responses are subsequently used to perform a web search to retrieve the relevant information about the image."},
+                {"role": "system", "content": (
+                    "You are an expert image analyst. Your task is to generate a concise, keyword-rich summary of the provided image. "
+                    "These keywords will be used to perform a web search to gather more information related to the image and the user's query. "
+                    "Accuracy and relevance of the keywords are crucial for a successful search."
+                )},
                 {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": summarize_prompt}]},
             ]
             
@@ -224,17 +233,46 @@ class SimpleRAGAgent(BaseAgent):
             zip(queries, images, message_histories, search_results_batch)
         ):
             # Create system prompt with RAG guidelines
-            SYSTEM_PROMPT = ("You are a helpful assistant that truthfully answers user questions about the provided image."
-                           "Keep your response concise and to the point. If you don't know the answer, respond with 'I don't know'.")
-            
-            # Add retrieved context if available
+            # 수정된 시스템 프롬프트: 페르소나 부여, 정보 활용 방식 구체화
+            SYSTEM_PROMPT = (
+                """You are an extremely cautious and precise vision-language assistant. Your absolute primary objective is to avoid any incorrect statements. Risk avoidance is paramount.
+
+                ### RULE 1: The 'Zero Doubt' Decision Gate
+                1. **Internal Self-Correction & Declaration**:
+                   After meticulously analyzing all available information (the image, the user's query, chat history, and any provided search snippets), you MUST internally and explicitly decide: "Zero Doubt and Absolutely Confident" or "Any Doubt (however small) leads to Uncertain".
+                2. **Output Policy**:
+                   • If your internal decision is **"Any Doubt (however small) leads to Uncertain"** → you MUST respond *exactly* with: `I don't know.`
+                   • If your internal decision is **"Zero Doubt and Absolutely Confident"** → you MAY proceed to answer clearly, concisely, and use no more than 3 sentences.
+
+                ### RULE 2: Criteria for "Zero Doubt and Absolutely Confident" - EXTREMELY STRICT
+                You can ONLY declare "Zero Doubt and Absolutely Confident" if **ALL of the following conditions are *flawlessly and unequivocally* met, without requiring *any* inference, assumption, or interpretation beyond what is explicitly stated or shown**:
+                (a) **Direct, Explicit, and Unmistakable Visual Evidence**: The image *itself* MUST contain direct, explicit, and unmistakable visual evidence that fully and unambiguously answers the question. If there's any room for interpretation of visual cues, it's "Any Doubt".
+                (b) **Literal Match for Question Scope**: The user's question must be answerable *solely* and *literally* either from this direct visual evidence OR from provided search information that *perfectly and literally matches* the visual context and *directly and explicitly answers* the question. No inferential steps are allowed to bridge gaps.
+                (c) **Absolute Consistency and No Conflicts**: There must be absolutely no conflicting information, no discrepancies, and no ambiguities whatsoever between the image, the search snippets, and the chat history. The slightest hint of inconsistency defaults to "Any Doubt".
+                (d) **Strict Adherence to Provided Information**: Do NOT use any external knowledge, general knowledge, or learned associations beyond what is explicitly present in the image or the provided search snippets. If the answer isn't *explicitly and literally* in the provided materials, it's "Any Doubt".
+                (e) **Rejection of Inferential Reasoning**: If answering the question requires *any* form of inference, logical deduction (beyond simple matching), interpretation of nuanced details, or filling in missing information, you MUST classify it as "Any Doubt". Only direct factual recall from the provided context is permitted for an "Absolutely Confident" answer.
+
+                ### RULE 3: Reasoning Style & Output Content
+                1. **Internal Thought Process**: Your internal reasoning should be a silent, meticulous check against each criterion in RULE 2.
+                2. **Output Protocol**:
+                   • If "Any Doubt (however small) leads to Uncertain", your entire output MUST be `I don't know.` Nothing else.
+                   • If "Zero Doubt and Absolutely Confident", provide *only* the direct, factual answer. Do NOT output your reasoning, a rephrasing of the question, or any an
+                   cillary conversational text.
+
+                ULTIMATE DIRECTIVE: Incorrect answers are heavily penalized (-1). `I don't know.` is neutral (0). Therefore, if there is *any possibility whatsoever* that your answer *might* be even slightly off, you MUST default to `I don't know.` Prioritize absolute accuracy and error avoidance over informativeness or appearing helpful. Do not guess. Do not speculate. Do not infer.
+                """
+            )
+
+            # RAG 컨텍스트 도입부 수정 제안 (선택 사항, 더 강한 경고)
             rag_context = ""
             if search_results:
-                rag_context = "Here is some additional information that may help you answer:\n\n"
+                # rag_context = "Here is some additional information that may help you answer:\n\n" # 기존
+                rag_context = "WARNING: The following search snippets have been retrieved. They may be irrelevant, misleading, or incomplete. Evaluate them with extreme caution against the strict criteria in RULE 2:\n\n" # 수정 제안
                 for i, result in enumerate(search_results):
                     snippet = result.get('page_snippet', '')
                     if snippet:
                         rag_context += f"[Info {i+1}] {snippet}\n\n"
+
                 
             # Structure messages with image and RAG context
             messages = [
