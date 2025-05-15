@@ -1,5 +1,5 @@
 { 
-    "challenge_id": "single-source-augmentation",
+    "challenge_id": "multi-source-augmentation",
     "gpu": true,
     "hf_models": [
         {
