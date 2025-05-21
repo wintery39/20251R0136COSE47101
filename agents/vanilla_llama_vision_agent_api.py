@@ -28,7 +28,7 @@ MAX_NUM_SEQS = 2
 
 MAX_GENERATION_TOKENS = 75
 
-class LlamaVisionModel(BaseAgent):
+class APILlamaVisionModel(BaseAgent):
     """
     LlamaVisionModel is an implementation of BaseAgent using Meta's Llama 3.2 Vision models.
     
