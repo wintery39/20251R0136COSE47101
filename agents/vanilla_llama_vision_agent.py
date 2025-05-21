@@ -138,7 +138,34 @@ class LlamaVisionModel(BaseAgent):
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": [{"type": "image"}]}
             ]
+
+            results = self.search_pipeline(image, k=2)
+
+            if results:
+                API_PROMPT = (
+                    "The following information may help you better understand the context. "
+                    "It provides factual reference details related to the task. "
+                    "You can use this information to improve the quality or accuracy of your response, "
+                    "but feel free to ignore it if it is not relevant.\n\n"
+                )
             
+                for result in results:
+                    if float(result["score"]) < 0.75:
+                        break
+
+                    for entity in result['entities']:
+
+                        for idx, (key, value) in enumerate(entity.items()):
+                            if idx < 5:
+                                break
+                            if isinstance(value, dict):
+                                for subkey, subvalue in value.items():
+                                    API_PROMPT += f"{subkey}: {subvalue}\n"
+                            else:
+                                API_PROMPT += f"{key}: {value}\n"
+                else:
+                    messages.append({"role": "user", "content": API_PROMPT})
+
             # Add history if exists - only relevant for multi-turn conversations
             if message_history:
                 messages = messages + message_history
