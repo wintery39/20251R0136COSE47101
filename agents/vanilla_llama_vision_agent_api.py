@@ -104,6 +104,55 @@ class APILlamaVisionModel(BaseAgent):
         """
         return AICROWD_SUBMISSION_BATCH_SIZE
 
+    def get_api_results(self, origin_image: Image.Image, k=5) -> str:
+        image_li = []
+        
+        image_li.append(origin_image)
+
+        width, height = origin_image.size
+
+        # 중간 지점
+        mid_x = width // 2
+        mid_y = height // 2
+
+        # 각 영역 자르기 (crop의 인자는 (left, upper, right, lower))
+        divide_coordinates = [
+            (0, 0, mid_x, mid_y),  # 왼쪽 위
+            (mid_x, 0, width, mid_y),  # 오른쪽 위
+            (0, mid_y, mid_x, height),  # 왼쪽 아래
+            (mid_x, mid_y, width, height)  # 오른쪽 아래
+        ]
+
+        for x, y, w, h in divide_coordinates:
+            cropped_image = origin_image.crop((x, y, w, h))
+            image_li.append(cropped_image)
+        
+        results = []
+        
+        for image in image_li:
+            response = self.search_pipeline(image, k = 2)
+            if response is None:
+                continue
+            
+            results.extend(response)
+
+        final_response_str = ""
+        for result in response:
+            if float(result["score"]) < 0.75:
+                break
+
+            for entity in result['entities']:
+                for idx, (key, value) in enumerate(entity.items()):
+                    if idx < 5:
+                        break
+                    if isinstance(value, dict):
+                        for subkey, subvalue in value.items():
+                            API_PROMPT += f"{subkey}: {subvalue}\n"
+                    else:
+                        API_PROMPT += f"{key}: {value}\n"
+        
+        return final_response_str
+
     def prepare_formatted_prompts(self, queries: List[str], images: List[Image.Image], message_histories: List[List[Dict[str, Any]]]) -> List[str]:
         """
         Prepare formatted prompts for the model by applying the chat template.
@@ -139,7 +188,7 @@ class APILlamaVisionModel(BaseAgent):
                 {"role": "user", "content": [{"type": "image"}]}
             ]
 
-            results = self.search_pipeline(image, k=2)
+            results = self.get_api_results(image, k=2)
 
             if results:
                 API_PROMPT = (
@@ -148,24 +197,9 @@ class APILlamaVisionModel(BaseAgent):
                     "You can use this information to improve the quality or accuracy of your response, "
                     "but feel free to ignore it if it is not relevant.\n\n"
                 )
-            
-                for result in results:
-                    if float(result["score"]) < 0.75:
-                        break
-
-                    for entity in result['entities']:
-
-                        for idx, (key, value) in enumerate(entity.items()):
-                            if idx < 5:
-                                break
-                            if isinstance(value, dict):
-                                for subkey, subvalue in value.items():
-                                    API_PROMPT += f"{subkey}: {subvalue}\n"
-                            else:
-                                API_PROMPT += f"{key}: {value}\n"
-                else:
-                    messages.append({"role": "user", "content": API_PROMPT})
-
+                API_PROMPT += results
+                messages.append({"role": "user", "content": API_PROMPT})
+                
             # Add history if exists - only relevant for multi-turn conversations
             if message_history:
                 messages = messages + message_history
@@ -183,6 +217,8 @@ class APILlamaVisionModel(BaseAgent):
             formatted_prompts.append(formatted_prompt)
 
         return formatted_prompts
+  
+ 
 
     def batch_generate_response(
         self,
