@@ -147,9 +147,9 @@ class APILlamaVisionModel(BaseAgent):
                         break
                     if isinstance(value, dict):
                         for subkey, subvalue in value.items():
-                            API_PROMPT += f"{subkey}: {subvalue}\n"
+                            final_response_str += f"{subkey}: {subvalue}\n"
                     else:
-                        API_PROMPT += f"{key}: {value}\n"
+                        final_response_str += f"{key}: {value}\n"
         
         return final_response_str
 
