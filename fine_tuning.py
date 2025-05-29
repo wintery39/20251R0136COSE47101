@@ -1,571 +1,301 @@
+import os
+import json # 스키마 확인용으로 남겨둘 수 있으나, 주 데이터 로딩에는 사용 안함
+from PIL import Image
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets # concatenate_datasets는 여러 스플릿 병합 시 사용 가능
+import functools # functools.partial 사용
+
 from transformers import (
-    AutoModelForVision2Seq,
     AutoProcessor,
+    MllamaForConditionalGeneration,
     TrainingArguments,
     Trainer,
-    DataCollatorForSeq2Seq
+    DefaultDataCollator,
 )
-from peft import LoraConfig, get_peft_model, TaskType
-import os
-from PIL import Image
-from torch.utils.data import Dataset
+from peft import LoraConfig, get_peft_model # prepare_model_for_kbit_training은 양자화 시 필요
 
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-
-# Optional wandb import
-try:
-    import wandb
-    WANDB_AVAILABLE = True
-except ImportError:
-    WANDB_AVAILABLE = False
-    print("WandB not installed. Install with: pip install wandb")
-
-# Initialize wandb for experiment tracking (optional)
-use_wandb = False
-if WANDB_AVAILABLE:
-    try:
-        wandb.init(project="llama-vision-finetune", name="crag-mm-finetune-a100")
-        use_wandb = True
-    except:
-        print("WandB not logged in. Run 'wandb login' or continue without logging.")
-else:
-    print("Continuing without WandB logging.")
-
-# Model configuration
+# --- 1. Configuration ---
 MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
-OUTPUT_DIR = "./llama-vision-finetuned"
+HF_DATASET_ID = "crag-mm-2025/crag-mm-single_turn-public" # 단일 턴 데이터셋 사용
+HF_DATASET_REVISION = "v0.1.1"
+# TODO: 사용자가 실제 학습에 사용할 데이터셋 스플릿 이름을 확인하고 설정해야 합니다.
+# 예: "train", "public_train". "validation"은 보통 검증용.
+# 여러 스플릿을 합쳐서 사용하려면 아래 main 함수 내 로직 수정.
+HF_DATASET_SPLIT = "train" # 기본값, 실제 사용 가능한 스플릿으로 변경 필요
 
-# Load model and processor
-print("Loading model and processor...")
+OUTPUT_DIR = "./llama3_2_11b_vision_finetuned_crag_mm" # 파인튜닝된 모델 저장 경로
 
-# Try to use Flash Attention 2 if available
-try:
-    import flash_attn
-    model = AutoModelForVision2Seq.from_pretrained(
-        MODEL_ID,
-        device_map="auto",
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
-        attn_implementation="flash_attention_2"  # New syntax for Flash Attention 2
-    )
-    print("Using Flash Attention 2")
-except ImportError:
-    model = AutoModelForVision2Seq.from_pretrained(
-        MODEL_ID,
-        device_map="auto",
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
-        attn_implementation="sdpa"  # Use PyTorch's native scaled dot-product attention
-    )
-    print("Flash Attention 2 not available, using PyTorch SDPA")
 
-processor = AutoProcessor.from_pretrained(MODEL_ID,trust_remote_code=True)
 
-try:
-    token_128256_str = processor.tokenizer.decode([128256])
-    print(f"Token ID 128256 decodes to: '{token_128256_str}'")
-except Exception as e:
-    print(f"Could not decode token ID 128256: {e}")
+MAX_SEQ_LENGTH = 1024 # <--- [사용자 검토/수정 가능 3]: 데이터의 평균적인 길이와 GPU 메모리 상황을 보고 조절. A100 40GB에서는 1024도 괜찮을 수 있으나, 더 길면 메모리 부족 가능성.
+LEARNING_RATE = 1e-4
+BATCH_SIZE_PER_DEVICE = 1 # <--- [사용자 검토/수정 가능 4]: A100 40GB에서 11B 모델은 1이 안전. OOM 발생 시 줄일 수는 없으므로, 대신 GRAD_ACCUM_STEPS 늘림. 만약 메모리가 남으면 2도 시도해볼 수 있으나 매우 신중해야 함.
+GRADIENT_ACCUMULATION_STEPS = 8 # <--- [사용자 검토/수정 가능 5]: 실질적 배치 크기(BATCH_SIZE * GRAD_ACCUM_STEPS)를 조절. 현재 1*8=8. GPU 메모리 부족 없이 학습 속도를 높이고 싶다면 이 값을 늘려서 실질적 배치 크기를 16, 32 등으로 조절.
+NUM_TRAIN_EPOCHS = 1 # <--- [사용자 검토/수정 가능 6]: 1.6GB 데이터셋이면 1 에포크도 꽤 학습량이 될 수 있음. 모델 성능을 보면서 2~3 에포크까지 늘려볼 수 있음.
+LOGGING_STEPS = 10
+SAVE_STEPS = 100 # <--- [사용자 검토/수정 가능 7]: 데이터셋 크기에 따라 조절. 1.6GB면 샘플 수가 많을 것이므로, 100~500 스텝 정도로 시작. 너무 자주 저장하면 디스크 공간 차지.
+BF16_ENABLED = torch.cuda.is_bf16_supported() # A100은 bfloat16 지원하므로 True로 설정됨.
 
-# Also check the actual vocab size of the tokenizer object
-print(f"Length of tokenizer's vocabulary (len(processor.tokenizer)): {len(processor.tokenizer)}")
+# LoRA 설정
+LORA_R = 16
+LORA_ALPHA = 32
+LORA_DROPOUT = 0.05
+LORA_TARGET_MODULES = [
+    "q_proj", "k_proj", "v_proj", "o_proj",
+    "gate_proj", "up_proj", "down_proj",
+]
 
-# Ensure padding token is set
-if processor.tokenizer.pad_token is None:
-    processor.tokenizer.pad_token = processor.tokenizer.eos_token
-
-# LoRA configuration - increased parameters for better performance
-lora_config = LoraConfig(
-    r=64,  # Increased rank for better adaptation
-    lora_alpha=128,
-    target_modules=[
-        "q_proj",
-        "k_proj", 
-        "v_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
-        "down_proj",
-        "embed_tokens",
-        "lm_head"
-    ],
-    lora_dropout=0.05,
-    bias="none",
-    task_type=TaskType.CAUSAL_LM,
-    inference_mode=False
-)
-
-# Apply LoRA
-print("Applying LoRA...")
-model = get_peft_model(model, lora_config)
-model.print_trainable_parameters()
-
-# Enable gradient checkpointing for memory efficiency
-model.gradient_checkpointing_enable()
-model.enable_input_require_grads()
-
-# Load dataset
-print("Loading dataset...")
-dataset = load_dataset("crag-mm-2025/crag-mm-single-turn-public", revision="v0.1.2")
-
-# Check available splits
-print(f"Available splits: {list(dataset.keys())}")
-
-# Use validation for training and public_test for evaluation
-train_split = 'validation'
-eval_split = 'public_test'
-
-print(f"Using {train_split} for training: {len(dataset[train_split])} samples")
-print(f"Using {eval_split} for evaluation: {len(dataset[eval_split])} samples")
-
-# Custom Dataset class for better control
-class VisionDataset(Dataset):
-    def __init__(self, dataset, processor, max_length=2048):
-        self.dataset = dataset
-        self.processor = processor
-        self.max_length = max_length
-        
-        # Filter out examples without images
-        self.valid_indices = []
-        print("Filtering dataset for examples with images...")
-        for i in range(len(dataset)):
-            if dataset[i].get('image') is not None:
-                self.valid_indices.append(i)
-        
-        print(f"Found {len(self.valid_indices)} examples with images out of {len(dataset)} total")
-        
-        # Option to download images from URLs (commented out for now)
-        # self._download_missing_images()
+# --- 2. Preprocessing Function for Hugging Face Dataset ---
+def preprocess_dataset_function(examples, processor, max_length):
+    all_input_ids = []
+    all_attention_masks = []
+    all_pixel_values = []
+    all_labels = []
     
-    def __len__(self):
-        return len(self.valid_indices)
-    
-    def __getitem__(self, idx):
-        # Get the actual dataset index
-        dataset_idx = self.valid_indices[idx]
-        example = self.dataset[dataset_idx]
-        
-        # Check if image exists
-        if example.get('image') is None:
-            # This shouldn't happen after filtering, but just in case
-            raise ValueError(f"No image found for example {dataset_idx}")
-        
-        # Extract the first turn (single-turn dataset)
-        query = example['turns']['query'][0]
-        answer = example['answers']['ans_full'][0]
-        
-        # Create conversation format
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": query}
-                ]
-            },
-            {
-                "role": "assistant",
-                "content": answer
-            }
-        ]
-        
-        # Process with the processor
-        text = self.processor.apply_chat_template(messages, tokenize=False)
-        
-        # Process image and text
-        inputs = self.processor(
-            text=text,
-            images=example['image'],
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=self.max_length
-        )
-        
-        # Remove batch dimension
-        processed = {k: v.squeeze(0) for k, v in inputs.items()}
-        
-        # Add labels (same as input_ids for causal LM)
-        processed['labels'] = processed['input_ids'].clone()
-        
-        # Mask padding tokens in labels
-        processed['labels'][processed['labels'] == self.processor.tokenizer.pad_token_id] = -100
-        processed['labels'][processed['labels'] == 128256] = -100 # Explicitly ignore this problematic token
+    skipped_samples_count = 0
 
+    if not examples or not examples.get(list(examples.keys())[0]): # examples가 비었거나, 첫번째 키의 값이 비었으면
+        return {"input_ids": torch.tensor([]), "attention_mask": torch.tensor([]), 
+                "pixel_values": torch.tensor([]), "labels": torch.tensor([])}
         
-        return processed
-    
-    def _download_missing_images(self):
-        """
-        Optional: Download images from URLs if needed
-        """
-        import requests
-        from io import BytesIO
-        
-        for i in range(len(self.dataset)):
-            example = self.dataset[i]
-            if example.get('image') is None and example.get('image_url'):
-                try:
-                    response = requests.get(example['image_url'], timeout=10)
-                    if response.status_code == 200:
-                        image = Image.open(BytesIO(response.content))
-                        # Note: This won't actually modify the dataset
-                        # You'd need to handle this differently
-                        print(f"Downloaded image from {example['image_url']}")
-                except Exception as e:
-                    print(f"Failed to download image: {e}")
+    num_samples_in_batch = len(examples[list(examples.keys())[0]])
 
-# Check how many examples have images vs URLs
-print("\nAnalyzing dataset image availability:")
-train_with_image = sum(1 for ex in dataset[train_split] if ex.get('image') is not None)
-eval_with_image = sum(1 for ex in dataset[eval_split] if ex.get('image') is not None)
-print(f"Training set: {train_with_image}/{len(dataset[train_split])} examples have images")
-print(f"Evaluation set: {eval_with_image}/{len(dataset[eval_split])} examples have images")
+    for i in range(num_samples_in_batch):
+        try:
+            current_image = examples['image'][i]
+            turns_data = examples['turns'][i]
+            answers_data = examples['answers'][i]
 
-# Create datasets
-print("Creating datasets...")
-train_dataset = VisionDataset(dataset[train_split], processor)
-eval_dataset = VisionDataset(dataset[eval_split], processor)
-
-print(f"Train dataset size: {len(train_dataset)}")
-print(f"Eval dataset size: {len(eval_dataset)}")
-
-# Debug: Check first example
-print("\nChecking first example structure:")
-first_example = dataset[train_split][0]
-print(f"Keys in example: {first_example.keys()}")
-print(f"Has image: {'image' in first_example and first_example['image'] is not None}")
-print(f"Has image_url: {'image_url' in first_example and first_example['image_url'] is not None}")
-if 'turns' in first_example:
-    print(f"Turns keys: {first_example['turns'].keys()}")
-    print(f"First query: {first_example['turns']['query'][0][:100]}...")
-if 'answers' in first_example:
-    print(f"Answers keys: {first_example['answers'].keys()}")
-    print(f"First answer: {first_example['answers']['ans_full'][0][:100]}...")
-
-# Debug: Test first batch
-print("\nTesting first batch processing...")
-try:
-    test_example = train_dataset[0]
-    print(f"First example keys: {test_example.keys()}")
-    print(f"Input shape: {test_example['input_ids'].shape}")
-    print(f"Labels shape: {test_example['labels'].shape}")
-    if 'pixel_values' in test_example:
-        print(f"Pixel values shape: {test_example['pixel_values'].shape}")
-except Exception as e:
-    print(f"Error processing first example: {e}")
-
-# Data collator
-data_collator = DataCollatorForSeq2Seq(
-    tokenizer=processor.tokenizer,
-    model=model,
-    padding=True,
-    pad_to_multiple_of=8,
-    return_tensors="pt"
-)
-
-# Training arguments - optimized for A100
-training_args = TrainingArguments(
-    output_dir=OUTPUT_DIR,
-    overwrite_output_dir=True,
-    num_train_epochs=3,
-    per_device_train_batch_size=2,  # Increased batch size
-    per_device_eval_batch_size=2,
-    gradient_accumulation_steps=2,  # Effective batch size = 16
-    gradient_checkpointing=True,
-    optim="adamw_torch",  # Better optimizer for full precision
-    logging_steps=10,
-    learning_rate=5e-5,  # Slightly higher learning rate
-    weight_decay=0.01,
-    fp16=False,
-    bf16=True,
-    max_grad_norm=1.0,
-    max_steps=-1,
-    warmup_ratio=0.03,
-    group_by_length=False,  # Disabled for vision dataset compatibility
-    lr_scheduler_type="cosine",
-    report_to="wandb" if use_wandb else "none",
-    save_steps=100,
-    save_total_limit=3,
-    eval_strategy="steps",  # Changed from evaluation_strategy
-    eval_steps=100,
-    logging_first_step=True,
-    push_to_hub=False,  # Set to True if you want to push to HuggingFace Hub
-    load_best_model_at_end=True,
-    metric_for_best_model="loss",
-    greater_is_better=False,
-    ddp_find_unused_parameters=False,
-    dataloader_num_workers=2,  # Reduced for stability with image loading
-    remove_unused_columns=False,
-    label_names=["labels"],  # Explicitly set label names
-)
-
-# Custom trainer class to handle vision inputs properly
-class VisionTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        labels = inputs.get("labels")
-        if labels is not None:
-            print(f"\n--- Batch Labels Check (Before Model Forward Pass) ---")
-            print(f"Labels dtype: {labels.dtype}, Labels device: {labels.device}")
-            print(f"Labels shape: {labels.shape}")
+            # 이미지 유효성 검사
+            if not isinstance(current_image, Image.Image):
+                # 데이터셋 설명에 따르면 'image' 필드는 PIL.Image 객체여야 함
+                # 만약 None이고 image_url이 있다면, 학습 데이터에서는 직접 사용하기 어려움
+                # (평가 서버는 image 필드를 채워준다고 명시됨)
+                print(f"Warning: Sample at batch index {i} 'image' is not a PIL Image (type: {type(current_image)}). Skipping.")
+                skipped_samples_count += 1
+                continue
             
-            try:
-                actual_token_labels = labels[labels != -100]
-                if actual_token_labels.numel() > 0:
-                    print(f"Labels min (excluding -100): {actual_token_labels.min().item()}")
-                    print(f"Labels max (excluding -100): {actual_token_labels.max().item()}")
-                else:
-                    print("Labels tensor contains only -100 or is empty after filtering -100s.")
-                print(f"Labels min (overall, including -100): {labels.min().item()}")
-                print(f"Labels max (overall, including -100): {labels.max().item()}")
-            except Exception as e:
-                print(f"Error getting min/max of labels: {e}")
+            if current_image.mode != 'RGB':
+                current_image = current_image.convert('RGB')
 
-            model_vocab_size = None
-            if hasattr(model.config, 'text_config') and hasattr(model.config.text_config, 'vocab_size'):
-                model_vocab_size = model.config.text_config.vocab_size
-            elif hasattr(model.config, 'vocab_size'):
-                model_vocab_size = model.config.vocab_size
+            # 'turns'와 'answers' 구조 및 내용 유효성 검사 (단일 턴 가정)
+            if not (isinstance(turns_data, list) and len(turns_data) > 0 and
+                    isinstance(answers_data, list) and len(answers_data) > 0 and
+                    'query' in turns_data[0] and isinstance(turns_data[0]['query'], str) and
+                    'ans_full' in answers_data[0] and isinstance(answers_data[0]['ans_full'], str) and
+                    turns_data[0]['query'].strip() and answers_data[0]['ans_full'].strip() ): # 내용이 비어있지 않은지 확인
+                print(f"Warning: Sample at batch index {i} has malformed, incomplete, or empty 'turns'/'answers' content. Skipping.")
+                skipped_samples_count += 1
+                continue
             
-            if model_vocab_size is not None:
-                print(f"Model's effective vocabulary size (n_classes): {model_vocab_size}")
-            else:
-                print(f"Warning: Could not reliably determine model's vocab_size from model.config.")
-                # Assuming 'processor' is accessible here; if not, you might need to pass it or get vocab size differently
-                # For this example, let's assume 'processor' is in the global scope or passed to the trainer.
-                # If 'processor' is not defined here, you'll need to adjust how you get processor.tokenizer.vocab_size
-                try:
-                    print(f"Using processor.tokenizer.vocab_size as a fallback for check: {processor.tokenizer.vocab_size}")
-                    model_vocab_size = processor.tokenizer.vocab_size 
-                except NameError:
-                    print("Error: 'processor' not defined in this scope to get tokenizer.vocab_size as fallback.")
-                    # Handle this case, e.g., by not performing the check if processor isn't available
-                    # or ensuring processor is available. For now, we'll proceed cautiously.
-                    # Setting model_vocab_size to a very large number to avoid false positives if it's None
-                    model_vocab_size = float('inf')
+            user_query = turns_data[0]['query']
+            assistant_answer = answers_data[0]['ans_full']
 
-
-            if model_vocab_size != float('inf'): # Only proceed if model_vocab_size is valid
-                print(f"Processor's tokenizer vocabulary size: {processor.tokenizer.vocab_size if 'processor' in globals() or 'processor' in locals() else 'processor not found'}")
-                
-                valid_indices_mask = (labels != -100)
-                out_of_bounds_mask = (labels < 0) | (labels >= model_vocab_size)
-                problematic_labels_mask = valid_indices_mask & out_of_bounds_mask
-                
-                if torch.any(problematic_labels_mask):
-                    print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-                    print(f"CRITICAL ERROR DETECTED: Invalid labels found in this batch!")
-                    print(f"Values of invalid labels: {labels[problematic_labels_mask]}")
-                    problematic_indices = problematic_labels_mask.nonzero(as_tuple=False)
-                    print(f"Indices of first few invalid labels in this batch (up to 10):")
-                    for i in range(min(10, problematic_indices.size(0))):
-                        print(f"  - Index: {problematic_indices[i].tolist()}, Value: {labels[tuple(problematic_indices[i])].item()}")
-                    input_ids = inputs.get("input_ids")
-                    if input_ids is not None and input_ids.shape == labels.shape:
-                        print(f"Corresponding input_ids for these invalid labels:")
-                        for i in range(min(10, problematic_indices.size(0))):
-                             print(f"  - Index: {problematic_indices[i].tolist()}, Input ID: {input_ids[tuple(problematic_indices[i])].item()}")
-                    print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-                else:
-                    print("All labels in this batch (not -100) appear to be within the valid range [0, vocab_size-1].")
-            else:
-                print("Skipping detailed label bound check as model_vocab_size could not be determined.")
-            print(f"--- End Batch Labels Check ---")
-
-        # Proceed with model computation
-        outputs = model(**inputs) # CUDA error will likely occur here if labels are bad
-        loss = outputs.loss
-        return (loss, outputs) if return_outputs else loss
-
-# Initialize trainer
-trainer = VisionTrainer(
-    model=model,
-    args=training_args,
-    train_dataset=train_dataset,
-    eval_dataset=eval_dataset,
-    data_collator=data_collator,
-)
-
-# Optional: Add custom callbacks
-from transformers import TrainerCallback
-
-class LossLoggingCallback(TrainerCallback):
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        if logs is not None:
-            if 'loss' in logs:
-                print(f"Step {state.global_step}: Loss = {logs['loss']:.4f}")
-
-trainer.add_callback(LossLoggingCallback())
-
-# Start training
-print("Starting training...")
-try:
-    trainer.train()
-except Exception as e:
-    print(f"Training error: {e}")
-    # Try with smaller batch size if OOM
-    if "out of memory" in str(e).lower():
-        print("Reducing batch size due to OOM...")
-        training_args.per_device_train_batch_size = 2
-        training_args.per_device_eval_batch_size = 2
-        trainer = VisionTrainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            data_collator=data_collator,
-        )
-        trainer.add_callback(LossLoggingCallback())
-        trainer.train()
-    else:
-        raise e
-
-# Save the final model
-print("Saving model...")
-trainer.save_model(OUTPUT_DIR)
-
-# Save LoRA adapters separately
-model.save_pretrained(f"{OUTPUT_DIR}/lora_adapters")
-processor.save_pretrained(f"{OUTPUT_DIR}/processor")
-
-# Push to Hub (optional)
-# trainer.push_to_hub()
-
-print("Training completed!")
-
-# Merge LoRA weights with base model (optional)
-def merge_lora_weights():
-    """
-    Merge LoRA weights with base model for easier deployment
-    """
-    from peft import PeftModel
-    
-    print("Loading base model...")
-    base_model = AutoModelForVision2Seq.from_pretrained(
-        MODEL_ID,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        trust_remote_code=True,
-        attn_implementation="sdpa"  # Use PyTorch SDPA
-    )
-    
-    print("Loading LoRA adapters...")
-    model = PeftModel.from_pretrained(
-        base_model,
-        f"{OUTPUT_DIR}/lora_adapters"
-    )
-    
-    print("Merging weights...")
-    model = model.merge_and_unload()
-    
-    print("Saving merged model...")
-    model.save_pretrained(f"{OUTPUT_DIR}/merged_model")
-    
-    return model
-
-# Example inference code
-def inference_example(image_path, query, use_merged_model=False):
-    """
-    Example function for inference with the fine-tuned model
-    """
-    if use_merged_model:
-        model = AutoModelForVision2Seq.from_pretrained(
-            f"{OUTPUT_DIR}/merged_model",
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
-            attn_implementation="sdpa"
-        )
-    else:
-        from peft import PeftModel
-        
-        base_model = AutoModelForVision2Seq.from_pretrained(
-            MODEL_ID,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
-            attn_implementation="sdpa"
-        )
-        
-        model = PeftModel.from_pretrained(
-            base_model,
-            f"{OUTPUT_DIR}/lora_adapters"
-        )
-    
-    model.eval()
-    
-    # Load processor
-    processor = AutoProcessor.from_pretrained(f"{OUTPUT_DIR}/processor")
-    
-    # Prepare input
-    image = Image.open(image_path)
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text", "text": query}
+            messages = [
+                {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": user_query}]},
+                {"role": "assistant", "content": [{"type": "text", "text": assistant_answer}]}
             ]
-        }
-    ]
-    
-    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = processor(
-        text=text,
-        images=image,
-        return_tensors="pt"
-    ).to(model.device)
-    
-    # Generate
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=512,
-            temperature=0.7,
-            do_sample=True,
-            top_p=0.9,
-            repetition_penalty=1.1
-        )
-    
-    # Decode
-    response = processor.decode(outputs[0], skip_special_tokens=True)
-    
-    # Extract assistant's response
-    assistant_marker = "assistant\n\n"
-    if assistant_marker in response:
-        response = response.split(assistant_marker)[-1].strip()
-    
-    return response
+            
+            prompt_text = processor.apply_chat_template(
+                messages,
+                add_generation_prompt=False, # 학습 시에는 False
+                tokenize=False
+            )
 
-# Optional: Evaluate on test set
-def evaluate_on_test_set():
-    """
-    Run evaluation on a subset of the test set
-    """
-    from tqdm import tqdm
-    import json
+            inputs = processor(
+                text=prompt_text,
+                images=current_image,
+                return_tensors="pt",
+                padding="max_length",
+                truncation=True,
+                max_length=max_length
+            )
+
+            all_input_ids.append(inputs["input_ids"].squeeze(0))
+            all_attention_masks.append(inputs["attention_mask"].squeeze(0))
+            all_pixel_values.append(inputs["pixel_values"].squeeze(0))
+            all_labels.append(inputs["input_ids"].squeeze(0).clone())
+
+        except Exception as e:
+            print(f"Error processing sample at batch index {i}: {e}. Skipping this sample.")
+            # print(f"Problematic sample 'session_id': {examples.get('session_id', ['N/A'])[i] if 'session_id' in examples and i < len(examples['session_id']) else 'N/A'}")
+            skipped_samples_count += 1
+            continue
     
-    results = []
-    test_subset = eval_dataset.dataset.select(range(min(100, len(eval_dataset))))
+    if skipped_samples_count == num_samples_in_batch and num_samples_in_batch > 0:
+        return {"input_ids": torch.tensor([]), "attention_mask": torch.tensor([]), 
+                "pixel_values": torch.tensor([]), "labels": torch.tensor([])}
+
+    # 스킵되지 않은 샘플이 하나라도 있을 경우에만 stack 수행
+    if not all_input_ids: # 모든 샘플이 스킵된 경우 (num_samples_in_batch가 0이었거나, 모두 스킵)
+         return {"input_ids": torch.tensor([]), "attention_mask": torch.tensor([]), 
+                "pixel_values": torch.tensor([]), "labels": torch.tensor([])}
+
+    try:
+        batch_features = {
+            "input_ids": torch.stack(all_input_ids),
+            "attention_mask": torch.stack(all_attention_masks),
+            "pixel_values": torch.stack(all_pixel_values),
+            "labels": torch.stack(all_labels),
+        }
+        return batch_features
+    except RuntimeError as e: # 스택 오류 (예: 빈 리스트)
+        print(f"Error stacking tensors, likely due to all samples in batch being skipped or other issues: {e}")
+        return {"input_ids": torch.tensor([]), "attention_mask": torch.tensor([]), 
+                "pixel_values": torch.tensor([]), "labels": torch.tensor([])}
+
+
+# --- 3. Main Fine-tuning Logic ---
+def main():
+    print(f"PyTorch version: {torch.__version__}")
+    current_time = torch.cuda.Event(enable_timing=True)
+    print(f"Current time from Pytorch: {current_time}") # 이 부분은 시간 측정용이므로, 실제 시간 출력에는 적합하지 않습니다.
+
+    if not torch.cuda.is_available():
+        print("ERROR: CUDA (GPU) is not available. This script requires a GPU.")
+        return
+    else:
+        print(f"CUDA available. Device: {torch.cuda.get_device_name(0)}")
+
+    # 프로세서 로드
+    print(f"Loading processor for {MODEL_ID}...")
+    processor = AutoProcessor.from_pretrained(MODEL_ID)
+    if processor.tokenizer.pad_token is None:
+        print("Setting pad_token to eos_token for tokenizer.")
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token # 일반적인 처리
+
+    # 모델 로드
+    print(f"Loading model {MODEL_ID}...")
+    model = MllamaForConditionalGeneration.from_pretrained(
+        MODEL_ID,
+        torch_dtype=torch.bfloat16 if BF16_ENABLED else torch.float16,
+        device_map="auto",
+    )
+
+    # LoRA 설정
+    print("Applying LoRA configuration...")
+    lora_config = LoraConfig(
+        r=LORA_R,
+        lora_alpha=LORA_ALPHA,
+        target_modules=LORA_TARGET_MODULES,
+        lora_dropout=LORA_DROPOUT,
+        bias="none",
+        task_type="CAUSAL_LM"
+    )
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
+
+    # Hugging Face 데이터셋 로드
+    print(f"Loading Hugging Face dataset: {HF_DATASET_ID}, revision: {HF_DATASET_REVISION}...")
+    try:
+        raw_datasets = load_dataset(HF_DATASET_ID, revision=HF_DATASET_REVISION)
+        print(f"Successfully loaded dataset. Available splits: {list(raw_datasets.keys())}")
+    except Exception as e:
+        print(f"Failed to load dataset {HF_DATASET_ID} with revision {HF_DATASET_REVISION}. "
+              f"Ensure you are logged in (`huggingface-cli login`) and have access. Error: {e}")
+        return
+
+    # 사용할 학습 스플릿 결정
+    train_split_name_to_use = ""
+    if HF_DATASET_SPLIT in raw_datasets:
+        train_split_name_to_use = HF_DATASET_SPLIT
+    elif "train" in raw_datasets: # 기본 'train' 스플릿 시도
+        train_split_name_to_use = "train"
+        print(f"Warning: Specified split '{HF_DATASET_SPLIT}' not found. Using 'train' split instead.")
+    elif "public_train" in raw_datasets: # CRAG-MM 대회에서 사용될 수 있는 스플릿 이름
+        train_split_name_to_use = "public_train"
+        print(f"Warning: Specified split '{HF_DATASET_SPLIT}' not found. Using 'public_train' split instead.")
+    elif list(raw_datasets.keys()): # 사용 가능한 첫 번째 스플릿 사용 (최후의 수단)
+        train_split_name_to_use = list(raw_datasets.keys())[0]
+        print(f"Warning: Specified split '{HF_DATASET_SPLIT}' and common train splits not found. Using first available split: '{train_split_name_to_use}'. Please verify this is correct for training.")
+    else:
+        print(f"Error: No splits found in dataset {HF_DATASET_ID}. Cannot proceed.")
+        return
     
-    for idx, example in enumerate(tqdm(test_subset)):
-        query = example['turns']['query'][0]
-        ground_truth = example['answers']['ans_full'][0]
-        
-        # Get prediction
-        prediction = inference_example(example['image'], query)
-        
-        results.append({
-            'idx': idx,
-            'query': query,
-            'ground_truth': ground_truth,
-            'prediction': prediction
-        })
+    print(f"Using '{train_split_name_to_use}' split for training.")
+    raw_train_dataset = raw_datasets[train_split_name_to_use]
+
+    print(f"Raw train dataset features: {raw_train_dataset.features}")
+    if len(raw_train_dataset) > 0:
+        print(f"First sample of raw train dataset (session_id): {raw_train_dataset[0]['session_id']}")
+    else:
+        print(f"Warning: The selected train split '{train_split_name_to_use}' is empty.")
+        return
+
+    _preprocess_with_args = functools.partial(
+        preprocess_dataset_function,
+        processor=processor,
+        max_length=MAX_SEQ_LENGTH
+    )
+
+    print("Preprocessing dataset with .map()...")
+    original_columns = raw_train_dataset.column_names
     
-    # Save results
-    with open(f"{OUTPUT_DIR}/evaluation_results.json", 'w') as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+    tokenized_train_dataset = raw_train_dataset.map(
+        _preprocess_with_args,
+        batched=True,
+        remove_columns=original_columns,
+        num_proc=max(1, os.cpu_count() // 2 if os.cpu_count() else 1),
+        load_from_cache_file=True,
+        desc=f"Preprocessing {train_split_name_to_use} split",
+    )
     
-    return results
+    # .map() 후 빈 배치가 생성되었을 수 있으므로, 실제 데이터가 있는 샘플만 필터링
+    def filter_non_empty_samples(example):
+        # preprocess_dataset_function이 빈 텐서를 반환할 경우 input_ids의 shape[0]이 0이 됨
+        return example['input_ids'].shape[0] > 0 if isinstance(example['input_ids'], torch.Tensor) else len(example['input_ids']) > 0
+
+
+    final_train_dataset = tokenized_train_dataset.filter(filter_non_empty_samples)
+
+
+    if len(final_train_dataset) == 0:
+        print("No data remaining after preprocessing and filtering. Check dataset and preprocessing logic. Exiting.")
+        return
+
+    print(f"Processed dataset ready. Number of samples: {len(final_train_dataset)}")
+    # print(f"Features of processed dataset: {final_train_dataset.features}") # .map()에서 remove_columns를 하면 features가 바뀜
+    if len(final_train_dataset) > 0:
+         print(f"First sample of processed dataset (keys): {final_train_dataset[0].keys()}")
+
+
+    training_args = TrainingArguments(
+        output_dir=OUTPUT_DIR,
+        per_device_train_batch_size=BATCH_SIZE_PER_DEVICE,
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+        learning_rate=LEARNING_RATE,
+        num_train_epochs=NUM_TRAIN_EPOCHS,
+        lr_scheduler_type="cosine",
+        warmup_ratio=0.03,
+        logging_dir=f"{OUTPUT_DIR}/logs",
+        logging_strategy="steps",
+        logging_steps=LOGGING_STEPS,
+        save_strategy="steps",
+        save_steps=SAVE_STEPS,
+        save_total_limit=2, # 이전 체크포인트는 2개까지만 유지
+        bf16=BF16_ENABLED,
+        fp16=not BF16_ENABLED and torch.cuda.is_available(),
+        gradient_checkpointing=True,
+        report_to="tensorboard", # 또는 "wandb"
+        remove_unused_columns=False, # map에서 이미 처리됨
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=final_train_dataset,
+        tokenizer=processor.tokenizer, # 내부 로깅 등에 필요
+        data_collator=DefaultDataCollator(),
+    )
+
+    print("Starting fine-tuning...")
+    trainer.train()
+
+    print(f"Saving final LoRA adapter to {OUTPUT_DIR}...")
+    model.save_pretrained(OUTPUT_DIR)
+    processor.save_pretrained(OUTPUT_DIR)
+
+    print(f"Fine-tuning finished successfully! Model saved to {os.path.abspath(OUTPUT_DIR)}")
+
+if __name__ == "__main__":
+    main()
