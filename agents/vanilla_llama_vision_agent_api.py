@@ -104,7 +104,13 @@ class APILlamaVisionModel(BaseAgent):
         """
         return AICROWD_SUBMISSION_BATCH_SIZE
 
-    def get_api_results(self, origin_image: Image.Image, k=5) -> str:
+    def get_useful_entities(self, entities: List[str], query: str) -> List[str]:
+        
+
+        
+        return list()
+
+    def get_api_results(self, origin_image: Image.Image, k=5) -> Dict[str, Any]:
         image_li = []
         
         image_li.append(origin_image)
@@ -127,31 +133,20 @@ class APILlamaVisionModel(BaseAgent):
             cropped_image = origin_image.crop((x, y, w, h))
             image_li.append(cropped_image)
         
-        results = []
+        entities = dict()
         
         for image in image_li:
-            response = self.search_pipeline(image, k = 2)
-            if response is None:
+          response = self.search_pipeline(image, k = 5)
+          assert response is not None, "No results found"
+          
+        for result in response:
+            if float(result['score']) < 0.55:
                 continue
             
-            results.extend(response)
-
-        final_response_str = ""
-        for result in response:
-            if float(result["score"]) < 0.75:
-                break
-
             for entity in result['entities']:
-                for idx, (key, value) in enumerate(entity.items()):
-                    if idx < 5:
-                        break
-                    if isinstance(value, dict):
-                        for subkey, subvalue in value.items():
-                            final_response_str += f"{subkey}: {subvalue}\n"
-                    else:
-                        final_response_str += f"{key}: {value}\n"
-        
-        return final_response_str
+                entities.update({entity["entity_name"]: entity["entity_attributes"]})
+              
+        return entities
 
     def prepare_formatted_prompts(self, queries: List[str], images: List[Image.Image], message_histories: List[List[Dict[str, Any]]]) -> List[str]:
         """

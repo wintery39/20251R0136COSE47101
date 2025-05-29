@@ -37,16 +37,19 @@ for x, y, w, h in divide_coordinates:
     cropped_image = origin_image.crop((x, y, w, h))
     image_li.append(cropped_image)
 
-results = []
+entities = dict()
 start_time = time.time()
 print("start time: "+time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
 for image in image_li:
-  response = search_pipeline(image, k = 5)
-  assert response is not None, "No results found"
-  results.extend(response)
+    response = search_pipeline(image, k = 5)
+    assert response is not None, "No results found"
+  
+    for result in response:
+        for entity in result['entities']:
+            entities.update({entity["entity_name"]: entity["entity_attributes"]})
 print("end time: "+time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
 print(f"Time taken for search: {time.time() - start_time:.2f} seconds")
 
-for result in results:
-    print(result)
-    print('\n')
+# for entity_name, attributes in entities.items():
+#     print(f"Entity Name: {entity_name}")
+#     print()  # 줄바꿈
