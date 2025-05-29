@@ -332,7 +332,6 @@ class VisionTrainer(Trainer):
             if model_vocab_size is not None:
                 print(f"Model's effective vocabulary size (n_classes): {model_vocab_size}")
             else:
-                print(f"Warning: Could not reliably determine model's vocab_size from model.config.")
                 # Assuming 'processor' is accessible here; if not, you might need to pass it or get vocab size differently
                 # For this example, let's assume 'processor' is in the global scope or passed to the trainer.
                 # If 'processor' is not defined here, you'll need to adjust how you get processor.tokenizer.vocab_size
