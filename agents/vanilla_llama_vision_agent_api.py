@@ -6,7 +6,7 @@ from PIL import Image
 from transformers import MllamaForConditionalGeneration, AutoProcessor
 from agents.base_agent import BaseAgent
 from cragmm_search.search import UnifiedSearchPipeline
-
+from agents.prompt import SYS_PROMPT
 import vllm
 
 # Configuration constants
@@ -111,6 +111,7 @@ class APILlamaVisionModel(BaseAgent):
         return list()
 
     def get_api_results(self, origin_image: Image.Image, k=5) -> Dict[str, Any]:
+        return None
         image_li = []
         
         image_li.append(origin_image)
@@ -140,13 +141,26 @@ class APILlamaVisionModel(BaseAgent):
           assert response is not None, "No results found"
           
         for result in response:
-            if float(result['score']) < 0.55:
+            if float(result['score']) < 0.75:
                 continue
             
             for entity in result['entities']:
                 entities.update({entity["entity_name"]: entity["entity_attributes"]})
-              
-        return entities
+
+        entity_info = ""
+
+        for entity_name, attributes in entities.items():
+            if "description" in attributes:
+                continue
+            if "url" in attributes:
+                continue
+
+            entity_info += f"<Entity: {entity_name}>\n"
+            for key, value in attributes.items():
+                entity_info += f"{entity_name}: {value}\n"
+            print('\n')
+        
+        return entity_info
 
     def prepare_formatted_prompts(self, queries: List[str], images: List[Image.Image], message_histories: List[List[Dict[str, Any]]]) -> List[str]:
         """
@@ -175,9 +189,9 @@ class APILlamaVisionModel(BaseAgent):
         for query_idx, (query, image) in enumerate(zip(queries, images)):
             message_history = message_histories[query_idx]
             
+
             # Structure messages with image placeholder
-            SYSTEM_PROMPT = ("You are a helpful assistant that truthfully answers user questions about the provided image."
-                           "Keep your response concise and to the point. If you don't know the answer, respond with 'I don't know'.")
+            SYSTEM_PROMPT = SYS_PROMPT
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": [{"type": "image"}]}

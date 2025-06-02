@@ -41,9 +41,11 @@ entities = dict()
 start_time = time.time()
 print("start time: "+time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
 for image in image_li:
-    response = search_pipeline(image, k = 5)
+    response = search_pipeline(image, k = 25)
     assert response is not None, "No results found"
-  
+
+    for result in response:
+        print(result)
     for result in response:
         for entity in result['entities']:
             entities.update({entity["entity_name"]: entity["entity_attributes"]})
