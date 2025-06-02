@@ -41,7 +41,7 @@ entities = dict()
 start_time = time.time()
 print("start time: "+time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
 for image in image_li:
-    response = search_pipeline(image, k = 25)
+    response = search_pipeline(image, k = 2)
     assert response is not None, "No results found"
 
     for result in response:

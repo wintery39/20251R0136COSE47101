@@ -32,3 +32,11 @@ Example:
     • Analysis: The word “this” is ambiguous—it could refer to the bag, the book, or the entire drawing.
     • Output: I don't know.
 """
+
+
+VERIFY_PROMPT = """You are given a user’s question and a list of image entities.
+Determine if any entity meaningfully relates to the question’s topic.
+If at least one entity connects to the question, output exactly “Yes”; if none do, output exactly “No”.
+Do not output anything else. Relevance requires a clear semantic link between the question and an entity.
+Ignore entities that do not help answer the question; one matching entity suffices. Base your decision solely on factual relevance, not aesthetics.
+"""

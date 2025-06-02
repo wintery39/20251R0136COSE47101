@@ -6,8 +6,9 @@ from PIL import Image
 from transformers import MllamaForConditionalGeneration, AutoProcessor
 from agents.base_agent import BaseAgent
 from cragmm_search.search import UnifiedSearchPipeline
-from agents.prompt import SYS_PROMPT
+from agents.prompt import SYS_PROMPT, VERIFY_PROMPT
 import vllm
+from crag_image_loader import ImageLoader
 
 # Configuration constants
 AICROWD_SUBMISSION_BATCH_SIZE = 8
@@ -104,13 +105,7 @@ class APILlamaVisionModel(BaseAgent):
         """
         return AICROWD_SUBMISSION_BATCH_SIZE
 
-    def get_useful_entities(self, entities: List[str], query: str) -> List[str]:
-        
-
-        
-        return list()
-
-    def get_api_results(self, origin_image: Image.Image, k=5) -> Dict[str, Any]:
+    def get_api_results(self, origin_image: Image.Image, query: str, k=5) -> Dict[str, Any]:
         image_li = []
         
         image_li.append(origin_image)
@@ -134,17 +129,58 @@ class APILlamaVisionModel(BaseAgent):
             image_li.append(cropped_image)
         
         entities = dict()
+        inputs = []
+        results = []
+
         
         for image in image_li:
             response = self.search_pipeline(image, k = 2)
             assert response is not None, "No results found"
           
             for result in response:
-                if float(result['score']) < 0.60:
+                if float(result['score']) < 0.65:
                     break
                 
-                for entity in result['entities']:
-                    entities.update({entity["entity_name"]: entity["entity_attributes"]})
+            
+                messages = [
+                    {"role": "system", "content": VERIFY_PROMPT},
+                    {"role": "user", "content": [{"type": "image"}]}
+                ]
+
+                messages += [{"role": "user", "content": query}]
+
+                prompt = self.tokenizer.apply_chat_template(
+                    messages,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+
+                
+                inputs.append({
+                    "prompt": prompt,
+                })
+
+                results.append(result)
+
+        # Generate responses
+        outputs = self.llm.generate(
+            inputs,
+            sampling_params=vllm.SamplingParams(
+                temperature=0.1,
+                top_p=0.9,
+                max_tokens=MAX_GENERATION_TOKENS,
+                skip_special_tokens=True
+            )
+        )
+
+        responses = [output.outputs[0].text for output in outputs]
+
+        for response, result in zip(responses, results):
+            if response.strip() != "Yes":
+                continue
+            
+            for entity in result['entities']:
+                entities.update({entity["entity_name"]: entity["entity_attributes"]})
 
         entity_info = ""
 
@@ -198,7 +234,7 @@ class APILlamaVisionModel(BaseAgent):
                 {"role": "user", "content": [{"type": "image"}]}
             ]
 
-            results = self.get_api_results(image, k=2)
+            results = self.get_api_results(image, query, k=2)
 
             if results:
                 API_PROMPT = (
