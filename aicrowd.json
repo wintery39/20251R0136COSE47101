@@ -1,7 +1,11 @@
 { 
-    "challenge_id": "multi-source-augmentation",
+    "challenge_id": "single-source-augmentation",
     "gpu": true,
     "hf_models": [
+        {
+            "repo_id": "KUInformatics/aicrowd_susik",
+            "revision": "main"
+        },
         {
             "repo_id": "meta-llama/Llama-3.2-11B-Vision-Instruct",
             "revision": "main"

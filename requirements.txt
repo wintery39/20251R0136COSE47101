@@ -26,3 +26,15 @@ chromadb>=1.0.0
 loguru
 rich
 tqdm
+
+
+
+torch>=2.0
+transformers>=4.40
+peft>=0.11
+datasets>=2.18
+Pillow
+wandb
+tqdm
+accelerate
+scipy
