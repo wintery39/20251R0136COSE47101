@@ -105,13 +105,9 @@ class APILlamaVisionModel(BaseAgent):
         """
         return AICROWD_SUBMISSION_BATCH_SIZE
 
-    def get_useful_entities(self, entities: List[str], query: str) -> List[str]:
-        
-
-        
-        return list()
 
     def get_api_results(self, origin_image: Image.Image, k=5) -> Dict[str, Any]:
+        return None  # no api
         image_li = []
         
         image_li.append(origin_image)
