@@ -35,7 +35,9 @@ divide_coordinates = [
 
 for x, y, w, h in divide_coordinates:
     cropped_image = origin_image.crop((x, y, w, h))
+    cropped_image.save(f"cropped_{x}_{y}_{w}_{h}.png")  # 저장
     image_li.append(cropped_image)
+
 
 entities = dict()
 start_time = time.time()
