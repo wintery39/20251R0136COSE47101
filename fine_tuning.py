@@ -271,7 +271,7 @@ training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
     overwrite_output_dir=True,
     num_train_epochs=3,
-    per_device_train_batch_size=2,  # Increased batch size
+    per_device_train_batch_size=8,  # Increased batch size
     per_device_eval_batch_size=2,
     gradient_accumulation_steps=2,  # Effective batch size = 16
     gradient_checkpointing=True,
