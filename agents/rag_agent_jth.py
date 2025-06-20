@@ -62,6 +62,7 @@ class SimpleRAGAgentJTH(BaseAgent):
                     "content": (
                         "You are a helpful assistant that accurately describes images. "
                         "Your responses will be used only as search keywords."
+                        "Please summarize the image with one concise sentence describing its key elements."
                     ),
                 },
                 {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": summarize_prompt}]},
