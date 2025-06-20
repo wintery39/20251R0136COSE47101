@@ -106,6 +106,7 @@ class SimpleRAGAgentJTH(BaseAgent):
                 "Answer ONLY if the information is explicitly present "
                 "in the image or the provided passages. "
                 "If not 100% sure, respond exactly with: I don't know."
+                "Please answer the question with one concise sentence."
             )
 
             messages = [
