@@ -1,0 +1,3 @@
+Using device: cpu
+Loading image index from huggingface crag-mm-2025/image-search-index-validation
+start time: 2025-06-02 21:21:27

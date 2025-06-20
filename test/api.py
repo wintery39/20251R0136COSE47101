@@ -35,15 +35,19 @@ divide_coordinates = [
 
 for x, y, w, h in divide_coordinates:
     cropped_image = origin_image.crop((x, y, w, h))
+    cropped_image.save(f"cropped_{x}_{y}_{w}_{h}.png")  # 저장
     image_li.append(cropped_image)
+
 
 entities = dict()
 start_time = time.time()
 print("start time: "+time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
 for image in image_li:
-    response = search_pipeline(image, k = 5)
+    response = search_pipeline(image, k = 2)
     assert response is not None, "No results found"
-  
+
+    for result in response:
+        print(result)
     for result in response:
         for entity in result['entities']:
             entities.update({entity["entity_name"]: entity["entity_attributes"]})
