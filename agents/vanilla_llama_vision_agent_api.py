@@ -111,6 +111,7 @@ class APILlamaVisionModel(BaseAgent):
         return list()
 
     def get_api_results(self, origin_image: Image.Image, k=5) -> Dict[str, Any]:
+        return None
         image_li = []
         
         image_li.append(origin_image)
