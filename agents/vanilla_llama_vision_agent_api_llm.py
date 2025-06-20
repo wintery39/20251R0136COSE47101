@@ -124,9 +124,9 @@ class APILlamaVisionModel(BaseAgent):
             (mid_x, mid_y, width, height)  # 오른쪽 아래
         ]
 
-        for x, y, w, h in divide_coordinates:
-            cropped_image = origin_image.crop((x, y, w, h))
-            image_li.append(cropped_image)
+        #for x, y, w, h in divide_coordinates:
+        #    cropped_image = origin_image.crop((x, y, w, h))
+        #    image_li.append(cropped_image)
         
         entities = dict()
         inputs = []
